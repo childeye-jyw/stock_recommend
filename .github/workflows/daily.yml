@@ -2,8 +2,9 @@ name: Daily Stock Recommendation
 
 on:
   schedule:
-    # 22:00 KST(UTC+9) = 13:00 UTC, 평일(월~금)
-    - cron: '0 13 * * 1-5'
+    # 22:07 KST(UTC+9) = 13:07 UTC, 평일(월~금)
+    # 정각(13:00)은 GitHub 전역적으로 예약 작업이 몰려 지연/스킵되기 쉬워 7분 뒤로 offset.
+    - cron: '7 13 * * 1-5'
   workflow_dispatch: {}
 
 jobs:
