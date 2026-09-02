@@ -12,7 +12,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from config import load_settings
-from core.market import get_recommendations, is_trading_day, today_str
+from core.market import get_latest_session_date, get_recommendations, is_recent_trading_day
 from core.message import format_recommendation_message
 from core.telegram import TelegramError, send_telegram_message
 
@@ -27,23 +27,27 @@ logger = logging.getLogger("stock_recommend_scheduler")
 
 def run_daily_job() -> None:
     settings = load_settings()
-    date_str = today_str()
 
-    if not is_trading_day(date_str):
-        logger.info("%s 는 휴장일입니다. 스킵합니다.", date_str)
+    latest_session = get_latest_session_date()
+    if not is_recent_trading_day(latest_session):
+        logger.info(
+            "최근 거래일(%s)이 오늘/어제 범위를 벗어나 스킵합니다. "
+            "(휴장일이거나, 예약 실행이 자정을 넘겨 지연되었을 수 있습니다.)",
+            latest_session,
+        )
         return
 
     df = get_recommendations(
         min_trading_value=int(settings["min_trading_value"]),
         min_change_pct=float(settings["min_change_pct"]),
     )
-    logger.info("%s 추천 종목 %d건 발견", date_str, len(df))
+    logger.info("%s 추천 종목 %d건 발견", latest_session, len(df))
 
     if not settings.get("telegram_enabled"):
         logger.info("텔레그램 알림이 비활성화되어 있어 전송하지 않습니다.")
         return
 
-    message = format_recommendation_message(date_str, df)
+    message = format_recommendation_message(latest_session, df)
     try:
         send_telegram_message(
             settings["telegram_bot_token"], settings["telegram_chat_id"], message

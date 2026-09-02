@@ -13,7 +13,7 @@ KRX(data.krx.co.kr)는 2025-12-27부터 무료 공개 API 접근을 막고 로�
 import re
 import time
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
@@ -40,6 +40,17 @@ def today_str() -> str:
     return datetime.now(_KST).strftime("%Y%m%d")
 
 
+def yesterday_str() -> str:
+    """한국 시간(KST) 기준 어제 날짜.
+
+    GitHub Actions의 schedule 트리거는 정각 부하로 인해 자정을 넘겨 지연 실행되는
+    경우가 잦다. 이 경우 실행 시점의 '오늘'은 이미 다음 날로 넘어갔지만, 아직 새 거래일
+    장이 열리기 전이라 최근 거래일은 여전히 어제로 조회된다. is_recent_trading_day()가
+    이런 지연 실행에서도 놓치지 않도록 오늘/어제 범위를 함께 확인하는 데 사용한다.
+    """
+    return (datetime.now(_KST) - timedelta(days=1)).strftime("%Y%m%d")
+
+
 def get_latest_session_date() -> Optional[str]:
     """가장 최근 거래일(YYYYMMDD)을 기준 종목의 최신 일봉 날짜로 조회한다."""
     params = {"symbol": _REFERENCE_TICKER, "timeframe": "day", "count": 1, "requestType": 0}
@@ -58,6 +69,15 @@ def get_latest_session_date() -> Optional[str]:
 def is_trading_day(date_str: str) -> bool:
     """해당 날짜가 가장 최근 거래일과 일치하는지 여부."""
     return get_latest_session_date() == date_str
+
+
+def is_recent_trading_day(latest_session: Optional[str]) -> bool:
+    """조회된 최근 거래일이 '오늘' 또는 '어제'(KST)에 해당하는지 여부.
+
+    예약 실행이 지연되어 자정을 넘긴 뒤 실행되더라도, 그 직전 거래일 데이터를
+    놓치지 않고 보고할 수 있도록 하루의 여유를 둔다.
+    """
+    return latest_session is not None and latest_session in (today_str(), yesterday_str())
 
 
 def _get_etf_etn_codes() -> Set[str]:
