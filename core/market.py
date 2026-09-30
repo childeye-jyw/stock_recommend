@@ -1,20 +1,21 @@
 """거래대금/등락률 기준 추천 종목 조회.
 
 KRX(data.krx.co.kr)는 2025-12-27부터 무료 공개 API 접근을 막고 로그인 기반
-'KRX 정보데이터시스템'으로 전환했다. 이 모듈은 로그인 없이 접근 가능한
-네이버 금융의 등락률 순위 페이지 + 실시간 시세 API를 조합해 동일한 정보를 얻는다.
+'KRX 정보데이터시스템'으로 전환했다. 또한 네이버 금융도 2026-09경 상승률/거래상위
+페이지를 서버 렌더링 HTML에서 클라이언트 렌더링(Next.js) 앱으로 전면 개편해,
+기존의 HTML 테이블 스크래핑 방식이 더 이상 동작하지 않게 되었다.
 
-절차:
-  1. 시장별(KOSPI/KOSDAQ) 등락률 상위 페이지(내림차순, 페이지네이션 없음)에서
-     등락률 조건을 만족하는 후보 종목을 뽑는다. (ETF/ETN 제외)
-  2. 후보 종목들의 정확한 거래대금/거래량/종가를 실시간 시세 API로 일괄 조회한다.
-  3. 거래대금 조건까지 만족하는 종목만 남긴다.
+이 모듈은 그 신규 앱이 내부적으로 호출하는 공개 JSON API
+(stock.naver.com/api/domestic/market/stock/default)를 대신 사용한다. 로그인이
+필요 없고, 종목당 거래대금(원 단위)·등락률·종가·거래량을 한 번의 요청으로 모두
+제공하며, ETF/ETN은 애초에 이 목록에 포함되지 않아 별도 제외 처리가 필요 없다.
+
+orderType=up 으로 조회하면 등락률이 양수인 종목만 등락률 내림차순으로 반환되므로,
+거래대금/등락률 조건은 클라이언트 측에서 그대로 필터링하면 된다.
 """
-import re
-import time
 import warnings
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Set
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -24,12 +25,10 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 _HEADERS = {"User-Agent": "Mozilla/5.0"}
-_RISE_URL = "https://finance.naver.com/sise/sise_rise.naver"
 _CHART_URL = "https://fchart.stock.naver.com/sise.nhn"
-_QUOTE_URL = "https://polling.finance.naver.com/api/realtime/domestic/stock/{codes}"
-_MARKETS = (0, 1)  # 0: KOSPI, 1: KOSDAQ
+_STOCK_LIST_URL = "https://stock.naver.com/api/domestic/market/stock/default"
 _REFERENCE_TICKER = "005930"  # 휴장일 판단 기준 종목 (삼성전자)
-_QUOTE_BATCH_SIZE = 80
+_PAGE_SIZE = 3000  # 코스피+코스닥 전체 종목 수(약 2,900개)보다 여유 있게 큰 값
 _KST = ZoneInfo("Asia/Seoul")
 
 _RESULT_COLUMNS = ["종목코드", "종목명", "종가", "등락률", "거래량", "거래대금"]
@@ -80,144 +79,51 @@ def is_recent_trading_day(latest_session: Optional[str]) -> bool:
     return latest_session is not None and latest_session in (today_str(), yesterday_str())
 
 
-def _get_etf_etn_codes() -> Set[str]:
-    """ETF/ETN 종목코드 목록 (추천 대상에서 제외하기 위함)."""
-    codes: Set[str] = set()
-    sources = [
-        ("https://finance.naver.com/api/sise/etfItemList.naver", "etfItemList"),
-        ("https://finance.naver.com/api/sise/etnItemList.naver", "etnItemList"),
-    ]
-    for url, key in sources:
-        try:
-            resp = requests.get(url, headers=_HEADERS, timeout=5)
-            resp.encoding = "euc-kr"
-            data = resp.json()
-            for item in data.get("result", {}).get(key, []):
-                code = item.get("itemcode")
-                if code:
-                    codes.add(code)
-        except (requests.RequestException, ValueError, KeyError):
-            continue
-    return codes
-
-
-def _parse_rise_page(sosok: int, min_change_pct: float) -> List[Dict]:
-    """등락률 내림차순 상승 종목 목록에서 min_change_pct 이상인 종목만 추출한다.
-
-    이 페이지는 (확인 결과) 페이지네이션 없이 조건에 맞는 전체 종목을 한 번에 반환하며,
-    등락률 기준 내림차순으로 정렬되어 있다.
-    """
-    resp = requests.get(_RISE_URL, params={"sosok": sosok}, headers=_HEADERS, timeout=10)
-    resp.encoding = "euc-kr"
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    rows: List[Dict] = []
-    for tr in soup.select("table.type_2 tr"):
-        tds = tr.find_all("td")
-        if len(tds) < 8:
-            continue
-        link = tds[1].find("a")
-        if not link or "code=" not in link.get("href", ""):
-            continue
-        try:
-            change_pct = float(tds[4].get_text(strip=True).replace("%", "").replace("+", ""))
-        except ValueError:
-            continue
-        if change_pct < min_change_pct:
-            continue
-        code = link["href"].split("code=")[-1]
-        rows.append(
-            {
-                "종목코드": code,
-                "종목명": tds[1].get_text(strip=True),
-                "등락률": change_pct,
-            }
-        )
-    return rows
-
-
-def _parse_won_amount(text: str) -> int:
-    """'3조 8,198억' / '2,529억' / '-' 형태의 문자열을 원 단위 정수로 변환한다."""
-    if not text:
-        return 0
-    text = text.strip()
-    if text in ("", "-"):
-        return 0
-
-    total = 0
-    m = re.search(r"([\d,]+)\s*조", text)
-    if m:
-        total += int(m.group(1).replace(",", "")) * 1_000_000_000_000
-    m = re.search(r"([\d,]+)\s*억", text)
-    if m:
-        total += int(m.group(1).replace(",", "")) * 100_000_000
-
-    if "조" not in text and "억" not in text:
-        cleaned = text.replace(",", "")
-        if cleaned.lstrip("-").isdigit():
-            total = int(cleaned)
-
-    return total
-
-
-def _fetch_quote_details(codes: List[str]) -> Dict[str, Dict]:
-    """종목코드 목록에 대해 정확한 종가/거래량/거래대금 정보를 일괄 조회한다."""
-    details: Dict[str, Dict] = {}
-    for i in range(0, len(codes), _QUOTE_BATCH_SIZE):
-        batch = codes[i : i + _QUOTE_BATCH_SIZE]
-        url = _QUOTE_URL.format(codes=",".join(batch))
-        try:
-            resp = requests.get(url, headers=_HEADERS, timeout=10)
-            data = resp.json()
-        except (requests.RequestException, ValueError):
-            continue
-
-        for item in data.get("datas", []):
-            code = item.get("itemCode")
-            if not code:
-                continue
-            try:
-                price = int(str(item.get("closePrice", "0")).replace(",", ""))
-            except ValueError:
-                price = 0
-            try:
-                volume = int(str(item.get("accumulatedTradingVolume", "0")).replace(",", ""))
-            except ValueError:
-                volume = 0
-            details[code] = {
-                "종가": price,
-                "거래량": volume,
-                "거래대금": _parse_won_amount(item.get("accumulatedTradingValue", "")),
-            }
-        time.sleep(0.1)
-    return details
-
-
 def get_recommendations(min_trading_value: float, min_change_pct: float) -> pd.DataFrame:
-    """가장 최근 거래일 기준, 거래대금/등락률 조건을 만족하는 종목(ETF/ETN 제외)을 조회한다."""
-    exclude_codes = _get_etf_etn_codes()
-
-    candidates: Dict[str, Dict] = {}
-    for sosok in _MARKETS:
-        for row in _parse_rise_page(sosok, min_change_pct):
-            if row["종목코드"] not in exclude_codes:
-                candidates[row["종목코드"]] = row
-
-    if not candidates:
+    """가장 최근 거래일 기준, 거래대금/등락률 조건을 만족하는 종목을 조회한다."""
+    params = {
+        "tradeType": "KRX",
+        "marketType": "ALL",
+        "orderType": "up",
+        "startIdx": 0,
+        "pageSize": _PAGE_SIZE,
+    }
+    try:
+        resp = requests.get(_STOCK_LIST_URL, params=params, headers=_HEADERS, timeout=15)
+        data = resp.json()
+    except (requests.RequestException, ValueError):
         return pd.DataFrame(columns=_RESULT_COLUMNS)
 
-    details = _fetch_quote_details(list(candidates.keys()))
+    if not isinstance(data, list):
+        return pd.DataFrame(columns=_RESULT_COLUMNS)
 
     records = []
-    for code, row in candidates.items():
-        detail = details.get(code)
-        if not detail or detail["거래대금"] < min_trading_value:
+    for item in data:
+        try:
+            change_pct = float(item["prevChangeRate"])
+            trade_amount = int(item["tradeAmount"])
+        except (KeyError, TypeError, ValueError):
             continue
-        records.append({**row, **detail})
+        if change_pct < min_change_pct or trade_amount < min_trading_value:
+            continue
+        try:
+            price = int(item["nowPrice"])
+            volume = int(item["tradeVolume"])
+        except (KeyError, TypeError, ValueError):
+            price, volume = 0, 0
+        records.append(
+            {
+                "종목코드": item.get("itemcode", ""),
+                "종목명": item.get("itemname", ""),
+                "종가": price,
+                "등락률": change_pct,
+                "거래량": volume,
+                "거래대금": trade_amount,
+            }
+        )
 
     if not records:
         return pd.DataFrame(columns=_RESULT_COLUMNS)
 
-    df = pd.DataFrame(records)
-    df = df.sort_values("등락률", ascending=False).reset_index(drop=True)
+    df = pd.DataFrame(records).sort_values("등락률", ascending=False).reset_index(drop=True)
     return df[_RESULT_COLUMNS]
