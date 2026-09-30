@@ -1,6 +1,7 @@
 {
   "min_trading_value": 200000000000,
   "min_change_pct": 5.0,
+  "min_listed_days": 30,
   "telegram_bot_token": "",
   "telegram_chat_id": "",
   "telegram_enabled": false

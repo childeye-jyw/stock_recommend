@@ -34,6 +34,13 @@ with st.sidebar:
         step=0.5,
         help="당일 등락률이 이 값 이상인 종목만 추천합니다.",
     )
+    min_listed_days = st.number_input(
+        "최소 상장 경과일 (일)",
+        min_value=0,
+        value=int(settings.get("min_listed_days", 30)),
+        step=5,
+        help="상장한 지 이 일수 미만인 신규 상장 종목은 추천에서 제외합니다. 0이면 제외하지 않습니다.",
+    )
 
     st.divider()
     st.header("📨 텔레그램 알림")
@@ -47,6 +54,7 @@ with st.sidebar:
         new_settings = {
             "min_trading_value": int(min_trading_value_eok) * 100_000_000,
             "min_change_pct": float(min_change_pct),
+            "min_listed_days": int(min_listed_days),
             "telegram_enabled": telegram_enabled,
             "telegram_bot_token": telegram_bot_token,
             "telegram_chat_id": telegram_chat_id,
@@ -80,6 +88,7 @@ if fetch or "last_df" not in st.session_state:
             df = get_recommendations(
                 min_trading_value=int(settings["min_trading_value"]),
                 min_change_pct=float(settings["min_change_pct"]),
+                min_listed_days=int(settings.get("min_listed_days", 0)),
             )
             st.session_state.last_df = df
             st.session_state.last_date = latest_date

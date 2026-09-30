@@ -40,6 +40,7 @@ def run_daily_job() -> None:
     df = get_recommendations(
         min_trading_value=int(settings["min_trading_value"]),
         min_change_pct=float(settings["min_change_pct"]),
+        min_listed_days=int(settings.get("min_listed_days", 0)),
     )
     logger.info("%s 추천 종목 %d건 발견", latest_session, len(df))
 

@@ -9,6 +9,8 @@ DEFAULT_SETTINGS = {
     "min_trading_value": 200_000_000_000,
     # 최소 등락률 (%). 기본값 5%.
     "min_change_pct": 5.0,
+    # 최소 상장 경과일. 신규 상장 종목 제외용. 기본값 30일.
+    "min_listed_days": 30,
     "telegram_bot_token": "",
     "telegram_chat_id": "",
     "telegram_enabled": False,
@@ -21,6 +23,7 @@ _ENV_OVERRIDES = {
     "TELEGRAM_CHAT_ID": ("telegram_chat_id", str),
     "MIN_TRADING_VALUE": ("min_trading_value", int),
     "MIN_CHANGE_PCT": ("min_change_pct", float),
+    "MIN_LISTED_DAYS": ("min_listed_days", int),
 }
 
 

@@ -79,8 +79,15 @@ def is_recent_trading_day(latest_session: Optional[str]) -> bool:
     return latest_session is not None and latest_session in (today_str(), yesterday_str())
 
 
-def get_recommendations(min_trading_value: float, min_change_pct: float) -> pd.DataFrame:
-    """가장 최근 거래일 기준, 거래대금/등락률 조건을 만족하는 종목을 조회한다."""
+def get_recommendations(
+    min_trading_value: float, min_change_pct: float, min_listed_days: int = 0
+) -> pd.DataFrame:
+    """가장 최근 거래일 기준, 거래대금/등락률 조건을 만족하는 종목을 조회한다.
+
+    min_listed_days: 상장 후 최소 경과일. 신규 상장 종목은 거래 내역이 짧아 거래대금·
+    등락률 조건을 쉽게 만족하지만 추천 의도와 맞지 않으므로, 기준값보다 상장일이
+    최근인 종목은 제외한다. 0이면 걸러내지 않는다.
+    """
     params = {
         "tradeType": "KRX",
         "marketType": "ALL",
@@ -97,6 +104,8 @@ def get_recommendations(min_trading_value: float, min_change_pct: float) -> pd.D
     if not isinstance(data, list):
         return pd.DataFrame(columns=_RESULT_COLUMNS)
 
+    today = datetime.now(_KST).date()
+
     records = []
     for item in data:
         try:
@@ -106,6 +115,12 @@ def get_recommendations(min_trading_value: float, min_change_pct: float) -> pd.D
             continue
         if change_pct < min_change_pct or trade_amount < min_trading_value:
             continue
+
+        if min_listed_days > 0:
+            listed_date = _parse_yyyymmdd(item.get("listedDate"))
+            if listed_date is None or (today - listed_date).days < min_listed_days:
+                continue
+
         try:
             price = int(item["nowPrice"])
             volume = int(item["tradeVolume"])
@@ -127,3 +142,12 @@ def get_recommendations(min_trading_value: float, min_change_pct: float) -> pd.D
 
     df = pd.DataFrame(records).sort_values("등락률", ascending=False).reset_index(drop=True)
     return df[_RESULT_COLUMNS]
+
+
+def _parse_yyyymmdd(value: Optional[str]):
+    if not value or len(value) != 8 or not value.isdigit():
+        return None
+    try:
+        return datetime.strptime(value, "%Y%m%d").date()
+    except ValueError:
+        return None
